@@ -1,0 +1,362 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Bits Rain Overlay</title>
+<style>
+  * { box-sizing: border-box; }
+
+  html, body {
+    margin: 0;
+    padding: 0;
+    width: 100%;
+    height: 100%;
+    overflow: hidden;
+    background: transparent;
+  }
+
+  body {
+    pointer-events: none;
+  }
+
+  #overlay {
+    position: relative;
+    width: 100vw;
+    height: 100vh;
+    overflow: hidden;
+    pointer-events: none;
+  }
+
+  .bit {
+    position: absolute;
+    will-change: transform, opacity;
+    user-select: none;
+    pointer-events: none;
+    transform-origin: center center;
+    filter: drop-shadow(0 0 10px rgba(255,255,255,0.15));
+  }
+</style>
+</head>
+<body>
+  <div id="overlay"></div>
+
+<script>
+(() => {
+  const WS_URL = 'ws://127.0.0.1:8080/';
+  const PLAY_MS = 7000;
+
+  const overlay = document.getElementById('overlay');
+
+  let ws = null;
+  let reconnectTimer = null;
+
+  let particles = [];
+  let running = false;
+  let startTime = 0;
+  let stopSpawning = false;
+  let spawnTopTimer = null;
+  let spawnSideTimer = null;
+  let rafId = 0;
+  let cleanupTimer = null;
+
+  function clamp(n, min, max) {
+    return Math.max(min, Math.min(max, n));
+  }
+
+  function rand(min, max) {
+    return Math.random() * (max - min) + min;
+  }
+
+  function getBitsIcons(bits) {
+  const icons = [];
+
+  if (bits >= 1) icons.push('1.gif');
+  if (bits >= 100) icons.push('100.gif');
+  if (bits >= 1000) icons.push('1000.gif');
+  if (bits >= 5000) icons.push('5000.gif');
+  if (bits >= 10000) icons.push('10000.gif');
+
+  return icons;
+}
+
+  function pickRandomIcon(iconList) {
+    return iconList[Math.floor(Math.random() * iconList.length)];
+  }
+
+  function clearOverlay() {
+    cancelAnimationFrame(rafId);
+    clearTimeout(spawnTopTimer);
+    clearTimeout(spawnSideTimer);
+    clearTimeout(cleanupTimer);
+
+    running = false;
+    stopSpawning = true;
+    particles = [];
+
+    while (overlay.firstChild) {
+      overlay.removeChild(overlay.firstChild);
+    }
+  }
+
+  function createBitElement(src, size) {
+    const img = document.createElement('img');
+    img.className = 'bit';
+    img.src = src;
+    img.draggable = false;
+    img.style.width = size + 'px';
+    img.style.height = size + 'px';
+    img.style.opacity = '1';
+    overlay.appendChild(img);
+    return img;
+  }
+
+  function spawnTopBit(iconList, intensity) {
+    const w = window.innerWidth;
+    const size = rand(34, 66);
+    const src = pickRandomIcon(iconList);
+
+    const p = {
+      el: createBitElement(src, size),
+      x: rand(0, Math.max(1, w - size)),
+      y: rand(-140, -40),
+      vx: rand(-0.8, 0.8) * (0.6 + intensity * 0.3),
+      vy: rand(2.5, 5.5),
+      gravity: rand(0.16, 0.26),
+      bounce: rand(0.16, 0.28),
+      friction: rand(0.985, 0.994),
+      rot: rand(0, 360),
+      vr: rand(-3.5, 3.5),
+      size: size,
+      settled: false,
+      floorY: window.innerHeight - size - rand(0, 8)
+    };
+
+    particles.push(p);
+  }
+
+  function spawnSideBit(iconList, side, intensity) {
+    const h = window.innerHeight;
+    const size = rand(34, 66);
+    const src = pickRandomIcon(iconList);
+    const fromLeft = side === 'left';
+
+    const p = {
+      el: createBitElement(src, size),
+      x: fromLeft ? rand(-120, -40) : rand(window.innerWidth + 40, window.innerWidth + 120),
+      y: rand(h * 0.18, h * 0.78),
+      vx: fromLeft ? rand(4.5, 10.5) * (0.7 + intensity * 0.2) : -rand(4.5, 10.5) * (0.7 + intensity * 0.2),
+      vy: rand(-2.8, 1.5),
+      gravity: rand(0.14, 0.24),
+      bounce: rand(0.14, 0.25),
+      friction: rand(0.985, 0.994),
+      rot: rand(0, 360),
+      vr: rand(-5, 5),
+      size: size,
+      settled: false,
+      floorY: window.innerHeight - size - rand(0, 8)
+    };
+
+    particles.push(p);
+  }
+
+  function renderParticle(p) {
+    p.el.style.transform = `translate(${p.x}px, ${p.y}px) rotate(${p.rot}deg)`;
+  }
+
+  function updateParticles() {
+    const width = window.innerWidth;
+    const now = performance.now();
+    const elapsed = now - startTime;
+
+    for (let i = 0; i < particles.length; i++) {
+      const p = particles[i];
+
+      if (!p.settled) {
+        p.vy += p.gravity;
+        p.x += p.vx;
+        p.y += p.vy;
+        p.rot += p.vr;
+
+        if (p.x < 0) {
+          p.x = 0;
+          p.vx *= -0.5;
+        } else if (p.x > width - p.size) {
+          p.x = width - p.size;
+          p.vx *= -0.5;
+        }
+
+        if (p.y >= p.floorY) {
+          p.y = p.floorY;
+          p.vy *= -p.bounce;
+          p.vx *= p.friction;
+          p.vr *= 0.85;
+
+          if (Math.abs(p.vy) < 0.9) {
+            p.vy = 0;
+          }
+
+          if (Math.abs(p.vy) === 0 && Math.abs(p.vx) < 0.12) {
+            p.vx = 0;
+            p.vr = 0;
+            p.settled = true;
+          }
+        }
+      }
+
+      if (elapsed > PLAY_MS - 350) {
+        const fade = clamp((PLAY_MS - elapsed) / 350, 0, 1);
+        p.el.style.opacity = String(fade);
+      }
+
+      renderParticle(p);
+    }
+  }
+
+  function tick() {
+    if (!running) return;
+    updateParticles();
+    rafId = requestAnimationFrame(tick);
+  }
+
+  function scheduleTopSpawns(iconList, topCount, intensity) {
+    if (topCount <= 0) return;
+
+    const interval = Math.max(18, Math.floor(PLAY_MS / topCount));
+    let made = 0;
+
+    function step() {
+      if (stopSpawning || made >= topCount) return;
+      spawnTopBit(iconList, intensity);
+      made++;
+      spawnTopTimer = setTimeout(step, interval);
+    }
+
+    step();
+  }
+
+  function scheduleSideSpawns(iconList, sideCountEach, intensity) {
+    if (sideCountEach <= 0) return;
+
+    const total = sideCountEach * 2;
+    const interval = Math.max(20, Math.floor(PLAY_MS / total));
+    let madeLeft = 0;
+    let madeRight = 0;
+    let flip = false;
+
+    function step() {
+      if (stopSpawning || (madeLeft >= sideCountEach && madeRight >= sideCountEach)) return;
+
+      flip = !flip;
+
+      if (flip && madeLeft < sideCountEach) {
+        spawnSideBit(iconList, 'left', intensity);
+        madeLeft++;
+      } else if (!flip && madeRight < sideCountEach) {
+        spawnSideBit(iconList, 'right', intensity);
+        madeRight++;
+      } else if (madeLeft < sideCountEach) {
+        spawnSideBit(iconList, 'left', intensity);
+        madeLeft++;
+      } else if (madeRight < sideCountEach) {
+        spawnSideBit(iconList, 'right', intensity);
+        madeRight++;
+      }
+
+      spawnSideTimer = setTimeout(step, interval);
+    }
+
+    step();
+  }
+
+  function startBitsOverlay(bitsValue) {
+    const bits = clamp(parseInt(bitsValue, 10) || 1, 1, 10000);
+    const iconList = getBitsIcons(bits);
+
+    clearOverlay();
+
+    const intensity = bits / 1000;
+
+    const topCount = Math.round(30 + intensity * 170);
+    const sideCountEach = Math.round(18 + intensity * 55);
+
+    running = true;
+    stopSpawning = false;
+    startTime = performance.now();
+
+    scheduleTopSpawns(iconList, topCount, intensity);
+    scheduleSideSpawns(iconList, sideCountEach, intensity);
+
+    tick();
+
+    cleanupTimer = setTimeout(() => {
+      clearOverlay();
+    }, PLAY_MS);
+  }
+
+  function handlePayload(payload) {
+    if (!payload) return false;
+    if (payload.bits === undefined || payload.bits === null) return false;
+    startBitsOverlay(payload.bits);
+    return true;
+  }
+
+  function tryHandleMessage(raw) {
+    let msg;
+    try {
+      msg = JSON.parse(raw);
+    } catch {
+      return false;
+    }
+
+    if (msg && msg.event && msg.data && msg.data.type === 'custom.bits.overlay') {
+      return handlePayload(msg.data.payload || {});
+    }
+
+    if (msg && msg.type === 'custom.bits.overlay' && msg.payload) {
+      return handlePayload(msg.payload);
+    }
+
+    if (msg && msg.bits !== undefined) {
+      return handlePayload(msg);
+    }
+
+    return false;
+  }
+
+  function connect() {
+    clearTimeout(reconnectTimer);
+    ws = new WebSocket(WS_URL);
+
+    ws.onopen = () => {
+      try {
+        ws.send(JSON.stringify({
+          request: 'Subscribe',
+          id: 'sub-custom-bits-overlay',
+          events: {
+            General: ['Custom']
+          }
+        }));
+      } catch (e) {}
+    };
+
+    ws.onmessage = (event) => {
+      tryHandleMessage(event.data);
+    };
+
+    ws.onclose = () => {
+      reconnectTimer = setTimeout(connect, 2000);
+    };
+
+    ws.onerror = () => {};
+  }
+
+  connect();
+
+  window.testBits = function(bits = 1000) {
+    startBitsOverlay(bits);
+  };
+})();
+</script>
+</body>
+</html>
